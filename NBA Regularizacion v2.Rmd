@@ -1,0 +1,256 @@
+---
+title: "NBA - Regularizacion"
+author: "JC"
+date: "15/10/2019"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(rsample)  # data splitting  - muestreo de los datos 
+library(glmnet)   # implementing regularized regression approaches
+library(dplyr)    # basic data manipulation procedures
+library(ggplot2)  # plotting
+library(ISLR)
+library(readr)
+library (boot)
+
+
+NBA<-read_csv("nba.csv")
+summary(NBA)
+
+```
+```{r}
+attach(NBA)
+
+hist(Salary, col = "green",freq=FALSE, breaks = 30, xlab = "Salary", main = "Distribution")
+curve(dnorm(x, mean = mean(Salary), sd = sd(Salary)), add = TRUE, col = "red") #Distribucion normal del salario ¿?
+
+ggplot(data = NBA, mapping = aes( x = Age, y= Salary)) + geom_point() + geom_smooth()
+
+ggplot(data = NBA, mapping = aes( x = Age, y= Salary)) + geom_smooth()
+
+ggplot(data = NBA, mapping = aes( x = G, y= Salary)) + geom_point() + geom_smooth()
+
+ggplot(data = NBA, mapping = aes( x = MP, y= Salary)) + geom_point() + geom_smooth()
+
+ggplot(data = NBA, mapping = aes( x = G, y= MP, size = Salary, col= Salary)) + geom_point()
+
+
+```
+Eliminación de duplicados y valores 
+
+```{r}
+summary(duplicated(NBA$Player))
+
+NBAi<-which(duplicated(NBA$Player))
+
+NBA[NBAi[1],]
+NBA[NBAi[2],]
+
+rm(NBAi)
+
+##### ELIMINAR DUPLICADO ####################
+
+NBA_new <- NBA[-226,]
+
+attach(NBA_new)
+
+
+NBA_new<-rename(NBA_new,"USG"="USG%", "Par"="3PAr")
+summary(NBA_new)
+
+mNBA<- NBA_new[,-3]
+mNBA<- mNBA[,-5]
+mNBA<-mNBA[-1]
+
+summary(mNBA)
+which(is.na(mNBA$Par))
+
+mNBA<-mNBA[-c(30,38),]
+
+```
+
+
+A Partir de aqui vamos a entrenar
+
+```{r}
+
+detach(NBA_new)
+
+set.seed(250)
+numData=nrow(mNBA)
+train=sample(numData ,numData/2)
+
+regres.train =lm(Salary~.,mNBA ,subset = train )
+attach(mNBA)
+mean((Salary-predict(regres.train ,Auto))[-train ]^2)
+
+set.seed(200)
+regres.train2 =lm(Salary~.,mNBA,subset =train )
+mean((Salary-predict(regres.train2 ,Auto))[-train ]^2)
+
+glm.fit1=glm(Salary~.,mNBA,family = gaussian())
+coef(glm.fit1)
+
+
+
+
+```
+
+```{r}
+cv.err = cv.glm(mNBA,glm.fit1)
+cv.err$delta
+
+glm.fit2=glm(Salary~.-MP,mNBA,family = gaussian())
+cv.err2 =cv.glm(mNBA,glm.fit2)
+cv.err2$delta
+
+```
+
+```{r}
+set.seed(123)
+ames_split <- initial_split(mNBA, prop = .7, strata = "Salary")
+ames_train <- training(ames_split)
+ames_test  <- testing(ames_split)
+
+ames_train_x <- model.matrix(Salary~., ames_train)
+ames_train_y <- log(ames_train$Salary)
+
+ames_test_x <- model.matrix(Salary ~ ., ames_test)
+ames_test_y <- log(ames_test$Salary)
+
+library(caret)
+
+train_control <- trainControl(method = "cv", number = 10)
+
+caret_mod <- train(
+  x = ames_train_x,
+  y = ames_train_y,
+  method = "glmnet",
+  preProc = c("center", "scale", "zv", "nzv"),
+  trControl = train_control,
+  tuneLength = 5
+)
+
+caret_mod
+
+```
+
+Hemos obtenido Alpha = 0.775 y Lambda 0.7764796, por lo que en esta situación utilizaremos el metodo Elastic Nets
+
+```{r}
+lasso    <- glmnet(ames_train_x, ames_train_y, alpha = 1.0) 
+elastic1 <- glmnet(ames_train_x, ames_train_y, alpha = 0.25) 
+elastic2 <- glmnet(ames_train_x, ames_train_y, alpha = 0.75) 
+ridge    <- glmnet(ames_train_x, ames_train_y, alpha = 0.0)
+
+par(mfrow = c(2, 2), mar = c(6, 4, 6, 2) + 0.1)
+plot(lasso, xvar = "lambda", main = "Lasso (Alpha = 1)\n\n\n")
+plot(elastic1, xvar = "lambda", main = "Elastic Net (Alpha = .25)\n\n\n")
+plot(elastic2, xvar = "lambda", main = "Elastic Net (Alpha = .75)\n\n\n")
+plot(ridge, xvar = "lambda", main = "Ridge (Alpha = 0)\n\n\n")
+```
+
+
+
+
+
+
+```{r}
+fold_id <- sample(1:10, size = length(ames_train_y), replace=TRUE)
+
+# search across a range of alphas
+tuning_grid <- tibble::tibble(
+  alpha      = seq(0, 1, by = .1),
+  mse_min    = NA,
+  mse_1se    = NA,
+  lambda_min = NA,
+  lambda_1se = NA
+)
+```
+
+```{r}
+for(i in seq_along(tuning_grid$alpha)) {
+  
+  # fit CV model for each alpha value
+  fit <- cv.glmnet(ames_train_x, ames_train_y, alpha = tuning_grid$alpha[i], foldid = fold_id)
+  
+  # extract MSE and lambda values
+  tuning_grid$mse_min[i]    <- fit$cvm[fit$lambda == fit$lambda.min]
+  tuning_grid$mse_1se[i]    <- fit$cvm[fit$lambda == fit$lambda.1se]
+  tuning_grid$lambda_min[i] <- fit$lambda.min
+  tuning_grid$lambda_1se[i] <- fit$lambda.1se
+}
+
+tuning_grid
+```
+
+
+```{r}
+tuning_grid %>%
+  mutate(se = mse_1se - mse_min) %>%
+  ggplot(aes(alpha, mse_min)) +
+  geom_line(size = 2) +
+  geom_ribbon(aes(ymax = mse_min + se, ymin = mse_min - se), alpha = .25) +
+  ggtitle("MSE ± one standard error")
+```
+
+```{r}
+cv_lasso   <- cv.glmnet(ames_train_x, ames_train_y, alpha = 1.0)
+min(cv_lasso$cvm)
+
+
+# predict
+pred <- predict(cv_lasso, s = cv_lasso$lambda.min, ames_test_x)
+mean((ames_test_y - pred)^2)
+```
+
+
+
+
+
+
+
+```{r}
+#Ridge
+
+ames_ridge <- glmnet(
+  x = ames_train_x,
+  y = ames_train_y,
+  alpha = 0
+)
+
+plot(ames_ridge, xvar = "lambda")
+
+
+
+```
+
+
+
+
+
+```{r}
+#Lasso 
+
+ames_lasso <- cv.glmnet(
+  x = ames_train_x,
+  y = ames_train_y,
+  alpha = 1
+)
+# plot results
+plot(ames_lasso)
+```
+```{r}
+min(ames_lasso$cvm) # minimum MSE
+
+ames_lasso$lambda.min     # lambda for this min MSE
+
+ames_lasso$cvm[ames_lasso$lambda == ames_lasso$lambda.1se]  # 1 st.error of min MSE
+
+ames_lasso$lambda.1se  # lambda for this MSE
+
+```
+
